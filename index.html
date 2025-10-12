@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>赤い円の中で生き延びろ - Minimum Viable Build</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="game-root">
+    <canvas id="game-canvas" width="960" height="540"></canvas>
+    <div id="ui-layer">
+      <div class="hud hud-left">
+        <div id="hp-display" class="hud-block"></div>
+        <div id="ps-display" class="hud-block"></div>
+      </div>
+      <div class="hud hud-right">
+        <div id="score-display" class="hud-block"></div>
+        <div id="level-display" class="hud-block">
+          <div class="label">Lv <span id="level-text">1</span></div>
+          <div class="xp-bar">
+            <div class="xp-bar-fill" id="xp-bar-fill"></div>
+          </div>
+          <div class="xp-text" id="xp-text"></div>
+        </div>
+      </div>
+      <div id="ability-panel">
+        <div class="ability" id="ability-xp-range">
+          <div class="ability-title">XP吸引範囲 +10%</div>
+          <div class="ability-desc">自動取得。重複可 (最大3)。</div>
+          <div class="ability-stacks">Stacks: <span id="xp-range-stacks">0</span></div>
+        </div>
+        <div class="ability" id="ability-xp-sweep">
+          <div class="ability-title">XP全回収</div>
+          <div class="ability-desc">クリックまたは [C] キーで使用。</div>
+          <button id="xp-sweep-button">使用 (残り: <span id="xp-sweep-count">0</span>)</button>
+        </div>
+      </div>
+      <div id="toast-container"></div>
+      <div id="game-over" class="hidden">
+        <h1>GAME OVER</h1>
+        <p>Rキーで再スタート</p>
+      </div>
+    </div>
+  </div>
+  <script src="game.js"></script>
+</body>
+</html>
