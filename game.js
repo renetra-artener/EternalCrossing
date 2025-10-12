@@ -11,10 +11,9 @@
   const WALL_FIRST_TIME = 10;
   const WALL_INTERVAL = 20;
   const WALL_SHRINK_T = 10;
-  const WALL_SHRINK_R_START = Math.max(CANVAS_W, CANVAS_H);
-  const WALL_SHRINK_R_END = 50;
-  const WALL_PATTERN_SPACING = 28;
-  const WALL_PATTERN_SPEED = 32;
+  const WALL_OUTER_R = Math.hypot(CANVAS_W, CANVAS_H);
+  const WALL_BAND_START = 220;
+  const WALL_BAND_END = 20;
   const WALL_EXPLOSION_T = 0.6;
   const WALL_THRESHOLD_TABLE = [12, 20, 35, 60, 100, 180, 300, 500, 850, 1300, 2000];
   const WALL_DPS0 = 5;
@@ -302,13 +301,15 @@
 
   function spawnWall(index, state) {
     const center = { x: CANVAS_W / 2, y: CANVAS_H / 2 };
-    const startRadius = WALL_SHRINK_R_START;
     const wall = {
       active: true,
       t: 0,
       T: WALL_SHRINK_T,
-      rStart: startRadius,
-      rEnd: WALL_SHRINK_R_END,
+      outerRadius: WALL_OUTER_R,
+      bandStart: WALL_BAND_START,
+      bandEnd: WALL_BAND_END,
+      currentBand: WALL_BAND_START,
+      innerRadius: Math.max(WALL_OUTER_R - WALL_BAND_START, 0),
       threshold: wallThresholdAt(index),
       center,
       entered: false,
@@ -316,8 +317,6 @@
       damageElapsed: 0,
       currentDps: WALL_DPS0,
       index,
-      currentRadius: startRadius,
-      patternOffset: 0,
       exploding: false,
       explosionElapsed: 0,
       explosionDuration: WALL_EXPLOSION_T,
@@ -625,8 +624,9 @@
     if (!wall || !wall.active) return;
     const player = state.player;
     const dist = Math.hypot(player.pos.x - wall.center.x, player.pos.y - wall.center.y);
-    const currentRadius = wall.currentRadius;
-    const inside = dist <= currentRadius;
+    const outerRadius = wall.outerRadius ?? WALL_OUTER_R;
+    const innerRadius = clamp(wall.innerRadius ?? 0, 0, outerRadius);
+    const inside = dist >= innerRadius && dist <= outerRadius;
 
     if (inside && !wall.exploding) {
       if (!wall.entered) {
@@ -822,8 +822,9 @@
       };
       if (wall && wall.active) {
         const dist = Math.hypot(p.x - wall.center.x, p.y - wall.center.y);
-        const radius = wall.currentRadius ?? wall.rEnd;
-        if (dist < radius) continue;
+        const outer = wall.outerRadius ?? WALL_OUTER_R;
+        const inner = clamp(wall.innerRadius ?? 0, 0, outer);
+        if (dist >= inner && dist <= outer) continue;
       }
       return p;
     }
@@ -890,7 +891,9 @@
     if (wall.exploding) {
       wall.explosionElapsed += dt;
       const explodeProgress = clamp(wall.explosionElapsed / wall.explosionDuration, 0, 1);
-      wall.currentRadius = lerp(wall.rEnd, wall.rEnd * 1.6, explodeProgress);
+      const targetBand = Math.min(wall.outerRadius, lerp(wall.bandEnd, wall.outerRadius, explodeProgress));
+      wall.currentBand = targetBand;
+      wall.innerRadius = Math.max(wall.outerRadius - wall.currentBand, 0);
       wall.explosionAlpha = 1 - explodeProgress;
       if (wall.explosionElapsed >= wall.explosionDuration) {
         wall.active = false;
@@ -900,8 +903,8 @@
 
     wall.t += dt;
     const progress = clamp(wall.t / wall.T, 0, 1);
-    wall.currentRadius = lerp(wall.rStart, wall.rEnd, progress);
-    wall.patternOffset = (wall.patternOffset + dt * WALL_PATTERN_SPEED) % WALL_PATTERN_SPACING;
+    wall.currentBand = lerp(wall.bandStart, wall.bandEnd, progress);
+    wall.innerRadius = Math.max(wall.outerRadius - wall.currentBand, 0);
 
     if (wall.t >= wall.T) {
       wall.t = wall.T;
@@ -1057,46 +1060,34 @@
     // Draw deadline wall
     if (state.wall && state.wall.active) {
       const wall = state.wall;
-      const radius = wall.currentRadius ?? WALL_SHRINK_R_END;
+      const outerRadius = wall.outerRadius ?? WALL_OUTER_R;
+      const innerRadius = clamp(wall.innerRadius ?? 0, 0, outerRadius);
+      const fillAlpha = wall.exploding ? clamp(wall.explosionAlpha ?? 1, 0, 1) : 1;
+
       ctx.save();
-      ctx.translate(wall.center.x, wall.center.y);
       ctx.beginPath();
-      ctx.arc(0, 0, radius, 0, Math.PI * 2);
-      if (wall.exploding) {
-        const alpha = clamp(wall.explosionAlpha ?? 1, 0, 1);
-        const glow = ctx.createRadialGradient(0, 0, radius * 0.25, 0, 0, radius);
-        glow.addColorStop(0, `rgba(255, 180, 180, ${alpha * 0.5})`);
-        glow.addColorStop(1, `rgba(255, 60, 80, ${alpha * 0.1})`);
-        ctx.fillStyle = glow;
-        ctx.fill();
-      } else {
-        ctx.fillStyle = 'rgba(210, 40, 60, 0.32)';
-        ctx.fill();
-        ctx.save();
-        ctx.clip();
-        ctx.rotate(-Math.PI / 4);
-        const shrinkRange = wall.rStart - wall.rEnd;
-        const shrinkProgress = shrinkRange > 0 ? clamp((wall.rStart - radius) / shrinkRange, 0, 1) : 0;
-        const baseOffset = -radius + shrinkProgress * radius * 0.85;
-        const scrollOffset = wall.patternOffset ?? 0;
-        ctx.strokeStyle = 'rgba(255, 120, 140, 0.35)';
-        ctx.lineWidth = 6;
-        for (
-          let y = baseOffset - radius * 2;
-          y < radius * 2 + baseOffset + WALL_PATTERN_SPACING * 2;
-          y += WALL_PATTERN_SPACING
-        ) {
-          ctx.beginPath();
-          ctx.moveTo(-radius * 2, y + scrollOffset);
-          ctx.lineTo(radius * 2, y + scrollOffset + 8);
-          ctx.stroke();
-        }
-        ctx.restore();
+      ctx.arc(wall.center.x, wall.center.y, outerRadius, 0, Math.PI * 2);
+      if (innerRadius > 0) {
+        ctx.arc(wall.center.x, wall.center.y, innerRadius, 0, Math.PI * 2, true);
       }
+      ctx.clip('evenodd');
+      ctx.globalAlpha = fillAlpha;
+      ctx.fillStyle = 'rgba(255, 60, 80, 0.28)';
+      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+      ctx.restore();
+
+      ctx.save();
       ctx.lineWidth = 2;
       const strokeAlpha = wall.exploding ? clamp((wall.explosionAlpha ?? 1) * 0.9, 0, 0.9) : 0.9;
       ctx.strokeStyle = `rgba(255,255,255,${strokeAlpha})`;
+      ctx.beginPath();
+      ctx.arc(wall.center.x, wall.center.y, outerRadius, 0, Math.PI * 2);
       ctx.stroke();
+      if (innerRadius > 0 && innerRadius < outerRadius) {
+        ctx.beginPath();
+        ctx.arc(wall.center.x, wall.center.y, innerRadius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
       ctx.restore();
     }
 
