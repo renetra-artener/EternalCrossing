@@ -16,6 +16,13 @@
       </div>
       <div class="hud hud-right">
         <div id="score-display" class="hud-block"></div>
+        <div id="next-break-display" class="hud-block">
+          <div class="label">Next Break</div>
+          <div class="next-break-text" id="next-break-text">--</div>
+          <div class="next-break-bar">
+            <div class="next-break-bar-fill" id="next-break-bar-fill"></div>
+          </div>
+        </div>
         <div id="level-display" class="hud-block">
           <div class="label">Lv <span id="level-text">1</span></div>
           <div class="xp-bar">
@@ -27,19 +34,27 @@
       <div id="ability-panel">
         <div class="ability" id="ability-xp-range">
           <div class="ability-title">XP吸引範囲 +10%</div>
-          <div class="ability-desc">自動取得。重複可 (最大3)。</div>
+          <div class="ability-desc">レベルアップ選択で拡大。重複可。</div>
           <div class="ability-stacks">Stacks: <span id="xp-range-stacks">0</span></div>
         </div>
         <div class="ability" id="ability-xp-sweep">
           <div class="ability-title">XP全回収</div>
-          <div class="ability-desc">クリックまたは [C] キーで使用。</div>
+          <div class="ability-desc">取得でチャージ+1。クリックまたは [C] キーで使用。</div>
           <button id="xp-sweep-button">使用 (残り: <span id="xp-sweep-count">0</span>)</button>
         </div>
       </div>
+      <div id="multiplier-breakdown" class="hud-block"></div>
       <div id="toast-container"></div>
       <div id="game-over" class="hidden">
         <h1>GAME OVER</h1>
         <p>Rキーで再スタート</p>
+      </div>
+      <div id="perk-modal" class="hidden">
+        <div class="perk-modal-content">
+          <h2>パークを選択</h2>
+          <div class="perk-options" id="perk-options"></div>
+          <p class="perk-hint">1 / 2 / 3 キーでも選択できます</p>
+        </div>
       </div>
     </div>
   </div>
