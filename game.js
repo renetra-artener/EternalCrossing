@@ -11,8 +11,12 @@
   const WALL_FIRST_TIME = 10;
   const WALL_INTERVAL = 20;
   const WALL_SHRINK_T = 10;
-  const WALL_FIRST_THRESHOLD = 12;
-  const WALL_GROWTH = 1.25;
+  const WALL_SHRINK_R_START = Math.max(CANVAS_W, CANVAS_H);
+  const WALL_SHRINK_R_END = 50;
+  const WALL_PATTERN_SPACING = 28;
+  const WALL_PATTERN_SPEED = 32;
+  const WALL_EXPLOSION_T = 0.6;
+  const WALL_THRESHOLD_TABLE = [12, 20, 35, 60, 100, 180, 300, 500, 850, 1300, 2000];
   const WALL_DPS0 = 5;
   const WALL_DPS_RATE = 1.2;
   const ENEMY_SPAWN_COOLDOWN_MIN = 0.8;
@@ -38,9 +42,9 @@
       id: 'nice',
       name: 'ナイス回避',
       description: '危機を潜り抜けた余韻がスコア倍率を底上げする。',
-      base: 1,
-      delta0: 0.08,
-      a: 0.04,
+      base: 1.1,
+      delta0: 0.05,
+      a: 0.035,
       S: 4,
     },
     predation: {
@@ -243,6 +247,35 @@
     state.multiplierUiDirty = true;
   }
 
+  function applyNiceAvoidBonus(state) {
+    const def = getStackingMultiplierDef('nice');
+    if (!def) return;
+    const player = state.player;
+    let multiplier = player.multipliers.find(m => m.id === 'nice');
+    if (!multiplier) {
+      const extras = player.multipliers.filter(m => m.id !== 'survival');
+      if (extras.length >= MULTIPLIER_COLOR_CLASSES.length) {
+        return;
+      }
+      const slotIndex = extras.length;
+      multiplier = {
+        id: def.id,
+        name: def.name,
+        M: def.base,
+        stacks: 0,
+        delta0: def.delta0,
+        a: def.a,
+        S: def.S,
+        order: state.nextMultiplierOrder++,
+        colorSlot: slotIndex,
+      };
+      player.multipliers.push(multiplier);
+    }
+    applyStackingMultiplierGain(multiplier);
+    state.multiplierUiDirty = true;
+    addToast('ナイス回避！倍率上昇');
+  }
+
   const MULTIPLIER_PERKS = STACKING_MULTIPLIER_ORDER.map(id => {
     const def = getStackingMultiplierDef(id);
     return {
@@ -256,23 +289,26 @@
   });
 
   function wallThresholdAt(index) {
-    if (index === 0) return WALL_FIRST_THRESHOLD;
-    let threshold = WALL_FIRST_THRESHOLD;
-    for (let i = 1; i <= index; i++) {
-      threshold = Math.ceil(threshold * WALL_GROWTH);
+    if (index < 0) index = 0;
+    if (index < WALL_THRESHOLD_TABLE.length) {
+      return WALL_THRESHOLD_TABLE[index];
+    }
+    let threshold = WALL_THRESHOLD_TABLE[WALL_THRESHOLD_TABLE.length - 1];
+    for (let i = WALL_THRESHOLD_TABLE.length; i <= index; i++) {
+      threshold = Math.ceil(threshold * 1.5);
     }
     return threshold;
   }
 
   function spawnWall(index, state) {
     const center = { x: CANVAS_W / 2, y: CANVAS_H / 2 };
-    const startRadius = Math.max(CANVAS_W, CANVAS_H);
+    const startRadius = WALL_SHRINK_R_START;
     const wall = {
       active: true,
       t: 0,
       T: WALL_SHRINK_T,
       rStart: startRadius,
-      rEnd: 40,
+      rEnd: WALL_SHRINK_R_END,
       threshold: wallThresholdAt(index),
       center,
       entered: false,
@@ -281,6 +317,11 @@
       currentDps: WALL_DPS0,
       index,
       currentRadius: startRadius,
+      patternOffset: 0,
+      exploding: false,
+      explosionElapsed: 0,
+      explosionDuration: WALL_EXPLOSION_T,
+      explosionAlpha: 1,
     };
     addToast(`デッドライン出現！ スコア${wall.threshold}以上で突破`);
     return wall;
@@ -396,6 +437,13 @@
         enemy.ai.jitterVec = rotateVec(enemy.ai.driftDir, Math.PI / 2);
         break;
     }
+    const player = state.player;
+    if (player) {
+      enemy.prevPsDist = Math.hypot(enemy.pos.x - player.pos.x, enemy.pos.y - player.pos.y);
+    } else {
+      enemy.prevPsDist = null;
+    }
+    enemy.niceTriggered = false;
     return enemy;
   }
 
@@ -577,11 +625,10 @@
     if (!wall || !wall.active) return;
     const player = state.player;
     const dist = Math.hypot(player.pos.x - wall.center.x, player.pos.y - wall.center.y);
-    const currentRadius = lerp(wall.rStart, wall.rEnd, clamp(wall.t / wall.T, 0, 1));
-    wall.currentRadius = currentRadius;
+    const currentRadius = wall.currentRadius;
     const inside = dist <= currentRadius;
 
-    if (inside) {
+    if (inside && !wall.exploding) {
       if (!wall.entered) {
         wall.entered = true;
         if (player.score >= wall.threshold) {
@@ -731,8 +778,22 @@
 
   function updateEnemies(state, dt) {
     const keep = [];
+    const player = state.player;
     for (const enemy of state.enemies) {
+      const prevDist =
+        enemy.prevPsDist ?? Math.hypot(enemy.pos.x - player.pos.x, enemy.pos.y - player.pos.y);
       updateEnemy(state, enemy, dt);
+      const nowDist = Math.hypot(enemy.pos.x - player.pos.x, enemy.pos.y - player.pos.y);
+      if (
+        !enemy.niceTriggered &&
+        prevDist > player.psRadius &&
+        nowDist < player.psRadius &&
+        nowDist > player.r + enemy.r
+      ) {
+        enemy.niceTriggered = true;
+        applyNiceAvoidBonus(state);
+      }
+      enemy.prevPsDist = nowDist;
       enemy.life -= dt;
       if (enemy.life <= 0) {
         spawnXpOrb(state, randomPointAvoidingWall(state));
@@ -761,7 +822,7 @@
       };
       if (wall && wall.active) {
         const dist = Math.hypot(p.x - wall.center.x, p.y - wall.center.y);
-        const radius = lerp(wall.rStart, wall.rEnd, clamp(wall.t / wall.T, 0, 1));
+        const radius = wall.currentRadius ?? wall.rEnd;
         if (dist < radius) continue;
       }
       return p;
@@ -824,10 +885,32 @@
   function updateWall(state, dt) {
     const wall = state.wall;
     if (!wall || !wall.active) return;
+    if (wall.success) return;
+
+    if (wall.exploding) {
+      wall.explosionElapsed += dt;
+      const explodeProgress = clamp(wall.explosionElapsed / wall.explosionDuration, 0, 1);
+      wall.currentRadius = lerp(wall.rEnd, wall.rEnd * 1.6, explodeProgress);
+      wall.explosionAlpha = 1 - explodeProgress;
+      if (wall.explosionElapsed >= wall.explosionDuration) {
+        wall.active = false;
+      }
+      return;
+    }
+
     wall.t += dt;
-    if (wall.t >= wall.T && !wall.success) {
-      // Wall completed shrinking, keep active but cap radius
+    const progress = clamp(wall.t / wall.T, 0, 1);
+    wall.currentRadius = lerp(wall.rStart, wall.rEnd, progress);
+    wall.patternOffset = (wall.patternOffset + dt * WALL_PATTERN_SPEED) % WALL_PATTERN_SPACING;
+
+    if (wall.t >= wall.T) {
       wall.t = wall.T;
+      if (!wall.entered) {
+        addToast('デッドラインが中心に収束');
+      }
+      wall.exploding = true;
+      wall.explosionElapsed = 0;
+      wall.explosionAlpha = 1;
     }
   }
 
@@ -974,28 +1057,45 @@
     // Draw deadline wall
     if (state.wall && state.wall.active) {
       const wall = state.wall;
-      const radius = wall.currentRadius ?? lerp(wall.rStart, wall.rEnd, clamp(wall.t / wall.T, 0, 1));
+      const radius = wall.currentRadius ?? WALL_SHRINK_R_END;
       ctx.save();
+      ctx.translate(wall.center.x, wall.center.y);
       ctx.beginPath();
-      ctx.arc(wall.center.x, wall.center.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(210, 40, 60, 0.35)';
-      ctx.fill();
-
-      ctx.clip();
-      ctx.strokeStyle = 'rgba(255, 120, 140, 0.35)';
-      ctx.lineWidth = 6;
-      for (let x = -radius; x < radius * 2; x += 20) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x + radius * 2, radius * 2);
-        ctx.stroke();
+      ctx.arc(0, 0, radius, 0, Math.PI * 2);
+      if (wall.exploding) {
+        const alpha = clamp(wall.explosionAlpha ?? 1, 0, 1);
+        const glow = ctx.createRadialGradient(0, 0, radius * 0.25, 0, 0, radius);
+        glow.addColorStop(0, `rgba(255, 180, 180, ${alpha * 0.5})`);
+        glow.addColorStop(1, `rgba(255, 60, 80, ${alpha * 0.1})`);
+        ctx.fillStyle = glow;
+        ctx.fill();
+      } else {
+        ctx.fillStyle = 'rgba(210, 40, 60, 0.32)';
+        ctx.fill();
+        ctx.save();
+        ctx.clip();
+        ctx.rotate(-Math.PI / 4);
+        const shrinkRange = wall.rStart - wall.rEnd;
+        const shrinkProgress = shrinkRange > 0 ? clamp((wall.rStart - radius) / shrinkRange, 0, 1) : 0;
+        const baseOffset = -radius + shrinkProgress * radius * 0.85;
+        const scrollOffset = wall.patternOffset ?? 0;
+        ctx.strokeStyle = 'rgba(255, 120, 140, 0.35)';
+        ctx.lineWidth = 6;
+        for (
+          let y = baseOffset - radius * 2;
+          y < radius * 2 + baseOffset + WALL_PATTERN_SPACING * 2;
+          y += WALL_PATTERN_SPACING
+        ) {
+          ctx.beginPath();
+          ctx.moveTo(-radius * 2, y + scrollOffset);
+          ctx.lineTo(radius * 2, y + scrollOffset + 8);
+          ctx.stroke();
+        }
+        ctx.restore();
       }
-      ctx.restore();
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(wall.center.x, wall.center.y, radius, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
       ctx.lineWidth = 2;
+      const strokeAlpha = wall.exploding ? clamp((wall.explosionAlpha ?? 1) * 0.9, 0, 0.9) : 0.9;
+      ctx.strokeStyle = `rgba(255,255,255,${strokeAlpha})`;
       ctx.stroke();
       ctx.restore();
     }
