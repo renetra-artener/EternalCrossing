@@ -5,12 +5,12 @@
   const CANVAS_H = 540;
   const PLAYER_SPEED = 180;
   const PLAYER_R = 10;
-  const PS_BASE = 100;
+  const PS_BASE = 50;
   const XP_ATTRACT_BASE = 100;
   const XP_ORB_LIFE = 15;
   const WALL_FIRST_TIME = 10;
   const WALL_INTERVAL = 20;
-  const WALL_SHRINK_T = 8;
+  const WALL_SHRINK_T = 10;
   const WALL_FIRST_THRESHOLD = 12;
   const WALL_GROWTH = 1.25;
   const WALL_DPS0 = 5;
@@ -33,6 +33,15 @@
     S: 40,
   };
 
+  const MULTIPLIER_SLOTS = [
+    { id: 'base', label: 'ベース', colorClass: 'mul-base' },
+    { id: 'survival', label: '純粋生存時間', colorClass: 'mul-survival' },
+    { id: 'nice', label: 'ナイス回避', colorClass: 'mul-blue' },
+    { id: 'stop', label: '停止', colorClass: 'mul-green' },
+    { id: 'predation', label: '捕食', colorClass: 'mul-yellow' },
+    { id: 'wall', label: '壁タッチ', colorClass: 'mul-blue' },
+  ];
+
   const canvas = document.getElementById('game-canvas');
   const ctx = canvas.getContext('2d');
   const hpDisplay = document.getElementById('hp-display');
@@ -46,6 +55,11 @@
   const xpSweepButton = document.getElementById('xp-sweep-button');
   const toastContainer = document.getElementById('toast-container');
   const gameOverPanel = document.getElementById('game-over');
+  const nextBreakText = document.getElementById('next-break-text');
+  const nextBreakBarFill = document.getElementById('next-break-bar-fill');
+  const multiplierBreakdown = document.getElementById('multiplier-breakdown');
+  const perkModal = document.getElementById('perk-modal');
+  const perkOptions = document.getElementById('perk-options');
 
   class Random {
     constructor(seed) {
@@ -163,19 +177,21 @@
 
   function spawnWall(index, state) {
     const center = { x: CANVAS_W / 2, y: CANVAS_H / 2 };
-    const maxRadius = Math.hypot(CANVAS_W, CANVAS_H) / 2 + 120;
+    const startRadius = Math.max(CANVAS_W, CANVAS_H);
     const wall = {
       active: true,
       t: 0,
       T: WALL_SHRINK_T,
-      rStart: maxRadius,
-      rEnd: 60,
+      rStart: startRadius,
+      rEnd: 40,
       threshold: wallThresholdAt(index),
       center,
       entered: false,
       success: false,
       damageElapsed: 0,
       currentDps: WALL_DPS0,
+      index,
+      currentRadius: startRadius,
     };
     addToast(`デッドライン出現！ スコア${wall.threshold}以上で突破`);
     return wall;
@@ -231,6 +247,16 @@
       case 'Basic':
         enemy.speed = ENEMY_BASE_SPEED;
         enemy.r = 10;
+        enemy.ai.timer = state.rng.range(0.8, 1.2);
+        {
+          const towardCenter = normalize(sub({ x: CANVAS_W / 2, y: CANVAS_H / 2 }, enemy.pos));
+          if (length(towardCenter) === 0) {
+            const angle = state.rng.range(0, Math.PI * 2);
+            enemy.ai.dir = { x: Math.cos(angle), y: Math.sin(angle) };
+          } else {
+            enemy.ai.dir = towardCenter;
+          }
+        }
         break;
       case 'Swift':
         enemy.speed = ENEMY_BASE_SPEED * 1.5;
@@ -275,25 +301,131 @@
   function applyXpToPlayer(state, amount) {
     const player = state.player;
     player.xp += amount;
+    let leveled = false;
     while (player.xp >= player.xpNeeded) {
       player.xp -= player.xpNeeded;
       player.level += 1;
       player.xpNeeded = nextXpNeeded(player.level);
       addToast(`レベルアップ！ Lv${player.level}`);
-      autoGrantXpRange(state);
-      if (player.level % 3 === 0) {
-        state.xpSweepCharges += 1;
-        addToast('XP全回収を獲得！');
-      }
+      state.pendingPerkChoices += 1;
+      leveled = true;
+    }
+    if (leveled) {
+      maybeStartPerkDraft();
     }
   }
 
-  function autoGrantXpRange(state) {
+  function grantXpAttractPerk(state) {
     const player = state.player;
-    if (player.xpRangeStacks >= 3) return;
     player.xpRangeStacks += 1;
     player.xpAttractRadius = XP_ATTRACT_BASE * Math.pow(1.1, player.xpRangeStacks);
     addToast(`XP吸引範囲 +10% (x${player.xpRangeStacks})`);
+  }
+
+  function grantXpSweepCharge(state, amount = 1) {
+    state.xpSweepCharges += amount;
+    addToast(`XP全回収チャージ +${amount}`);
+  }
+
+  function resolveWallSuccess(state, wall) {
+    if (wall.success) return;
+    wall.success = true;
+    wall.active = false;
+    state.breaks += 1;
+    state.nextWallIndex += 1;
+    addToast(`デッドライン突破！ (${state.breaks})`);
+    grantXpSweepCharge(state, 1);
+  }
+
+  const PERK_LIBRARY = [
+    {
+      id: 'xp_attract',
+      name: 'XP吸引範囲 +10%',
+      description: 'XP吸引範囲を10%拡大する。重複して効果が加算される。',
+      apply(state) {
+        grantXpAttractPerk(state);
+      },
+    },
+    {
+      id: 'xp_sweep',
+      name: 'XP全回収',
+      description: 'XP全回収チャージを1つ獲得し、即時使用可能。',
+      apply(state) {
+        grantXpSweepCharge(state, 1);
+      },
+    },
+    {
+      id: 'prototype_boost',
+      name: 'プロトタイプ: 共鳴コア',
+      description: '将来のアップデートで機能追加予定。現バージョンでは演習用パーク。',
+      apply() {
+        addToast('プロトタイプパークを選択しました (効果未実装)');
+      },
+    },
+  ];
+
+  function rollPerkOptions() {
+    const pool = [...PERK_LIBRARY];
+    const picks = [];
+    while (picks.length < 3 && pool.length > 0) {
+      const index = Math.floor(state.rng.next() * pool.length);
+      picks.push(pool.splice(index, 1)[0]);
+    }
+    while (picks.length < 3) {
+      picks.push(PERK_LIBRARY[PERK_LIBRARY.length - 1]);
+    }
+    return picks;
+  }
+
+  function renderPerkOptions(options) {
+    perkOptions.innerHTML = '';
+    options.forEach((perk, idx) => {
+      const card = document.createElement('div');
+      card.className = 'perk-option';
+      card.dataset.index = String(idx);
+      card.innerHTML = `<h3>${idx + 1}. ${perk.name}</h3><p>${perk.description}</p>`;
+      card.addEventListener('click', () => {
+        choosePerk(idx);
+      });
+      perkOptions.appendChild(card);
+    });
+  }
+
+  function openPerkDraft() {
+    if (state.pendingPerkChoices <= 0) return;
+    state.paused = true;
+    state.perkModalActive = true;
+    state.pendingPerkChoices -= 1;
+    state.currentPerkOptions = rollPerkOptions();
+    renderPerkOptions(state.currentPerkOptions);
+    perkModal.classList.remove('hidden');
+  }
+
+  function closePerkModal() {
+    perkModal.classList.add('hidden');
+    perkOptions.innerHTML = '';
+    state.perkModalActive = false;
+    state.paused = false;
+    state.currentPerkOptions = [];
+  }
+
+  function choosePerk(index) {
+    if (!state.perkModalActive) return;
+    const perk = state.currentPerkOptions[index];
+    if (!perk) return;
+    perk.apply(state);
+    if (state.pendingPerkChoices > 0) {
+      openPerkDraft();
+    } else {
+      closePerkModal();
+    }
+  }
+
+  function maybeStartPerkDraft() {
+    if (!state.running) return;
+    if (state.perkModalActive) return;
+    if (state.pendingPerkChoices <= 0) return;
+    openPerkDraft();
   }
 
   function pickXpIfCollide(state) {
@@ -311,6 +443,7 @@
   }
 
   function consumeXpSweep(state) {
+    if (state.paused) return;
     if (state.xpSweepCharges <= 0) return;
     state.xpSweepCharges -= 1;
     let total = 0;
@@ -339,25 +472,13 @@
       if (!wall.entered) {
         wall.entered = true;
         if (player.score >= wall.threshold) {
-          wall.success = true;
-          wall.active = false;
-          state.breaks += 1;
-          state.nextWallIndex += 1;
-          addToast(`デッドライン突破！ (${state.breaks})`);
-          state.xpSweepCharges += 1;
-          addToast('XP全回収を獲得！');
+          resolveWallSuccess(state, wall);
         } else {
           addToast('スコア不足！デッドラインに耐えろ');
         }
       }
       if (!wall.success && player.score >= wall.threshold) {
-        wall.success = true;
-        wall.active = false;
-        state.breaks += 1;
-        state.nextWallIndex += 1;
-        addToast(`デッドライン突破！ (${state.breaks})`);
-        state.xpSweepCharges += 1;
-        addToast('XP全回収を獲得！');
+        resolveWallSuccess(state, wall);
       }
       if (!wall.success) {
         wall.damageElapsed += dt;
@@ -384,6 +505,11 @@
   function triggerGameOver(state) {
     if (!state.running) return;
     state.running = false;
+    state.paused = false;
+    state.perkModalActive = false;
+    state.pendingPerkChoices = 0;
+    perkModal.classList.add('hidden');
+    perkOptions.innerHTML = '';
     gameOverPanel.classList.remove('hidden');
     addToast('ゲームオーバー');
   }
@@ -392,8 +518,20 @@
     const player = state.player;
     switch (enemy.type) {
       case 'Basic': {
-        const desired = mulScalar(normalize(sub(player.pos, enemy.pos)), enemy.speed);
-        enemy.vel = lerpVec(enemy.vel, desired, 0.25);
+        enemy.ai.timer = (enemy.ai.timer || 0) - dt;
+        if (!enemy.ai.dir || (enemy.ai.dir.x === 0 && enemy.ai.dir.y === 0)) {
+          const angle = state.rng.range(0, Math.PI * 2);
+          enemy.ai.dir = { x: Math.cos(angle), y: Math.sin(angle) };
+        }
+        if (enemy.ai.timer <= 0) {
+          enemy.ai.timer = state.rng.range(0.8, 1.2);
+          const currentAngle = Math.atan2(enemy.ai.dir.y, enemy.ai.dir.x);
+          const delta = state.rng.range(-Math.PI / 9, Math.PI / 9);
+          const nextAngle = currentAngle + delta;
+          enemy.ai.dir = { x: Math.cos(nextAngle), y: Math.sin(nextAngle) };
+        }
+        const desired = mulScalar(enemy.ai.dir, enemy.speed);
+        enemy.vel = lerpVec(enemy.vel, desired, 0.08);
         break;
       }
       case 'Swift': {
@@ -601,18 +739,55 @@
     state.toasts = keep;
   }
 
+  function updateMultiplierBreakdownUI(state) {
+    if (!multiplierBreakdown) return;
+    const player = state.player;
+    const survival = player.multipliers.find(m => m.id === 'survival');
+    const extras = player.multipliers.filter(m => m.id !== 'survival');
+    const parts = [];
+    MULTIPLIER_SLOTS.forEach((slot, idx) => {
+      let value = null;
+      if (slot.id === 'base') {
+        value = player.level.toFixed(0);
+      } else if (slot.id === 'survival') {
+        value = survival ? survival.M.toFixed(3) : null;
+      } else {
+        if (extras.length > 0) {
+          const extra = extras.shift();
+          value = extra.M.toFixed(3);
+        }
+      }
+      const labelSpan = `<span class="mul-label">${slot.label}</span>`;
+      const valueSpan =
+        value === null
+          ? `<span class="mul-dash">—</span>`
+          : `<span class="mul-value">${value}</span>`;
+      parts.push(`<span class="mul-part ${slot.colorClass}">${labelSpan} ${valueSpan}</span>`);
+    });
+    const operator = '<span class="mul-operator">×</span>';
+    multiplierBreakdown.innerHTML = parts.join(operator);
+  }
+
   function updateUI(state) {
     const player = state.player;
     hpDisplay.textContent = `HP: ${Math.ceil(player.hp)}/${player.maxHp}`;
-    psDisplay.textContent = `PS: ${player.psRadius.toFixed(0)}px`;
-    scoreDisplay.textContent = `Score: ${Math.floor(player.score)}`;
+    psDisplay.textContent = `PS: ${Math.round(player.psRadius)}px`;
+    scoreDisplay.innerHTML = `<div class="score-label">SCORE</div><div class="score-value">${player.score.toFixed(1)}</div>`;
     levelText.textContent = player.level;
     xpText.textContent = `${Math.floor(player.xp)}/${player.xpNeeded}`;
     const ratio = clamp(player.xp / player.xpNeeded, 0, 1);
     xpBarFill.style.width = `${ratio * 100}%`;
     xpRangeStacks.textContent = player.xpRangeStacks;
     xpSweepCount.textContent = state.xpSweepCharges;
-    xpSweepButton.disabled = state.xpSweepCharges <= 0;
+    xpSweepButton.disabled = state.xpSweepCharges <= 0 || state.paused;
+
+    const nextThreshold = state.wall && state.wall.active ? state.wall.threshold : wallThresholdAt(state.nextWallIndex);
+    const scoreText = player.score.toFixed(1);
+    nextBreakText.textContent = `${nextThreshold} (Score ${scoreText} / ${nextThreshold})`;
+    const progress = nextThreshold > 0 ? clamp(player.score / nextThreshold, 0, 1) : 0;
+    nextBreakBarFill.style.width = `${progress * 100}%`;
+
+    updateMultiplierBreakdownUI(state);
   }
 
   function draw(state) {
@@ -757,6 +932,10 @@
     toasts: [],
     xpSweepCharges: 0,
     spawnPaused: false,
+    paused: false,
+    pendingPerkChoices: 0,
+    perkModalActive: false,
+    currentPerkOptions: [],
   };
 
   function resetState() {
@@ -775,6 +954,10 @@
     state.multiplierTimer = 0;
     state.xpSweepCharges = 0;
     state.spawnPaused = false;
+    state.paused = false;
+    state.pendingPerkChoices = 0;
+    state.perkModalActive = false;
+    state.currentPerkOptions = [];
     for (const toast of state.toasts) {
       if (toast.element && toast.element.parentElement) {
         toast.element.parentElement.removeChild(toast.element);
@@ -782,13 +965,15 @@
     }
     state.toasts = [];
     gameOverPanel.classList.add('hidden');
+    perkModal.classList.add('hidden');
+    perkOptions.innerHTML = '';
     for (let i = 0; i < 3; i++) {
       spawnXpOrb(state, randomPointAvoidingWall(state));
     }
   }
 
   function update(dt) {
-    if (!state.running) return;
+    if (!state.running || state.paused) return;
     state.time += dt;
     updatePlayer(state, dt);
     updateEnemies(state, dt);
@@ -821,12 +1006,32 @@
     }
     draw(state);
     updateUI(state);
-    updateToasts(delta);
+    if (!state.paused) {
+      updateToasts(delta);
+    }
     requestAnimationFrame(renderLoop);
   }
 
   function onKeyDown(e) {
     switch (e.code) {
+      case 'Digit1':
+      case 'Numpad1':
+        if (state.perkModalActive) {
+          choosePerk(0);
+        }
+        break;
+      case 'Digit2':
+      case 'Numpad2':
+        if (state.perkModalActive) {
+          choosePerk(1);
+        }
+        break;
+      case 'Digit3':
+      case 'Numpad3':
+        if (state.perkModalActive) {
+          choosePerk(2);
+        }
+        break;
       case 'ArrowUp':
       case 'KeyW':
         inputState.up = 1;
