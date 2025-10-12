@@ -33,14 +33,39 @@
     S: 40,
   };
 
-  const MULTIPLIER_SLOTS = [
-    { id: 'base', label: 'ベース', colorClass: 'mul-base' },
-    { id: 'survival', label: '純粋生存時間', colorClass: 'mul-survival' },
-    { id: 'nice', label: 'ナイス回避', colorClass: 'mul-blue' },
-    { id: 'stop', label: '停止', colorClass: 'mul-green' },
-    { id: 'predation', label: '捕食', colorClass: 'mul-yellow' },
-    { id: 'wall', label: '壁タッチ', colorClass: 'mul-blue' },
-  ];
+  const STACKING_MULTIPLIERS = {
+    nice: {
+      id: 'nice',
+      name: 'ナイス回避',
+      description: '危機を潜り抜けた余韻がスコア倍率を底上げする。',
+      base: 1,
+      delta0: 0.08,
+      a: 0.04,
+      S: 4,
+    },
+    predation: {
+      id: 'predation',
+      name: '捕食',
+      description: '攻めの姿勢を維持し、重ねるほど効率が急伸する。',
+      base: 1,
+      delta0: 0.12,
+      a: 0.06,
+      S: 5,
+    },
+    reflection: {
+      id: 'reflection',
+      name: '反射',
+      description: '反射の閃きが連鎖し、倍率を加速的に押し上げる。',
+      base: 1,
+      delta0: 0.1,
+      a: 0.05,
+      S: 6,
+    },
+  };
+
+  const STACKING_MULTIPLIER_ORDER = ['nice', 'predation', 'reflection'];
+  const MULTIPLIER_COLOR_CLASSES = ['mul-slot-1', 'mul-slot-2', 'mul-slot-3'];
+  const MULTIPLIER_DECIMALS = 2;
 
   const canvas = document.getElementById('game-canvas');
   const ctx = canvas.getContext('2d');
@@ -121,6 +146,12 @@
     return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) };
   }
 
+  function rotateVec(v, angle) {
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    return { x: v.x * cos - v.y * sin, y: v.x * sin + v.y * cos };
+  }
+
   function targetEnemies(tSec, breaks) {
     const base = Math.min(3 + Math.floor(tSec / 10), 10);
     const bonus = Math.min(breaks, 10);
@@ -165,6 +196,64 @@
     m.M += delta;
     m.n += 1;
   }
+
+  function getStackingMultiplierDef(id) {
+    return STACKING_MULTIPLIERS[id] ?? null;
+  }
+
+  function applyStackingMultiplierGain(multiplier) {
+    const n = multiplier.stacks;
+    const aEff = multiplier.a * (multiplier.S / (multiplier.S + n));
+    const delta = multiplier.delta0 + aEff * n;
+    multiplier.M += delta;
+    multiplier.stacks += 1;
+  }
+
+  function grantStackingMultiplier(state, id) {
+    const player = state.player;
+    const def = getStackingMultiplierDef(id);
+    if (!def) return;
+
+    let multiplier = player.multipliers.find(m => m.id === id);
+    if (!multiplier) {
+      const extras = player.multipliers.filter(m => m.id !== 'survival');
+      if (extras.length >= MULTIPLIER_COLOR_CLASSES.length) {
+        addToast('倍率枠はこれ以上追加できません');
+        return;
+      }
+      const slotIndex = extras.length;
+      multiplier = {
+        id: def.id,
+        name: def.name,
+        M: def.base,
+        stacks: 0,
+        delta0: def.delta0,
+        a: def.a,
+        S: def.S,
+        order: state.nextMultiplierOrder++,
+        colorSlot: slotIndex,
+      };
+      applyStackingMultiplierGain(multiplier);
+      player.multipliers.push(multiplier);
+      addToast(`${def.name}倍率を獲得 (${multiplier.stacks}スタック)`);
+    } else {
+      applyStackingMultiplierGain(multiplier);
+      addToast(`${multiplier.name ?? def.name}倍率が強化 (${multiplier.stacks}スタック)`);
+    }
+    state.multiplierUiDirty = true;
+  }
+
+  const MULTIPLIER_PERKS = STACKING_MULTIPLIER_ORDER.map(id => {
+    const def = getStackingMultiplierDef(id);
+    return {
+      id: `mult_${id}`,
+      name: `倍率: ${def.name}`,
+      description: `${def.description} 重ね取得で効率が加速的に上昇する。`,
+      apply(state) {
+        grantStackingMultiplier(state, id);
+      },
+    };
+  });
 
   function wallThresholdAt(index) {
     if (index === 0) return WALL_FIRST_THRESHOLD;
@@ -261,11 +350,24 @@
       case 'Swift':
         enemy.speed = ENEMY_BASE_SPEED * 1.5;
         enemy.r = 10;
+        enemy.ai.dir = normalize(
+          sub({ x: CANVAS_W / 2, y: CANVAS_H / 2 }, enemy.pos)
+        );
+        if (enemy.ai.dir.x === 0 && enemy.ai.dir.y === 0) {
+          const angle = state.rng.range(0, Math.PI * 2);
+          enemy.ai.dir = { x: Math.cos(angle), y: Math.sin(angle) };
+        }
+        enemy.ai.timer = state.rng.range(1.2, 2.4);
         break;
       case 'Zigzag':
         enemy.speed = ENEMY_BASE_SPEED * 1.2;
         enemy.r = 10;
         enemy.ai.phase = 0;
+        enemy.ai.baseDir = normalize(sub({ x: CANVAS_W / 2, y: CANVAS_H / 2 }, enemy.pos));
+        if (enemy.ai.baseDir.x === 0 && enemy.ai.baseDir.y === 0) {
+          enemy.ai.baseDir = { x: 1, y: 0 };
+        }
+        enemy.ai.retarget = state.rng.range(2.4, 4.2);
         break;
       case 'Wanderer':
         enemy.speed = ENEMY_BASE_SPEED * 0.9;
@@ -276,13 +378,22 @@
       case 'Blitz':
         enemy.speed = ENEMY_BASE_SPEED * 2.0;
         enemy.r = 10;
-        enemy.ai.timer = 0;
-        enemy.ai.dir = normalize(sub(state.player.pos, enemy.pos));
+        enemy.ai.timer = state.rng.range(0.8, 1.2);
+        enemy.ai.dir = normalize(sub({ x: CANVAS_W / 2, y: CANVAS_H / 2 }, enemy.pos));
+        if (enemy.ai.dir.x === 0 && enemy.ai.dir.y === 0) {
+          const angle = state.rng.range(0, Math.PI * 2);
+          enemy.ai.dir = { x: Math.cos(angle), y: Math.sin(angle) };
+        }
+        enemy.ai.burst = 0;
         break;
       case 'Heavy':
         enemy.speed = ENEMY_BASE_SPEED * 0.6;
         enemy.r = 16;
-        enemy.ai.dir = vec2();
+        const driftAngle = state.rng.range(0, Math.PI * 2);
+        enemy.ai.driftDir = { x: Math.cos(driftAngle), y: Math.sin(driftAngle) };
+        enemy.ai.driftTimer = state.rng.range(1.4, 2.4);
+        enemy.ai.jitterTimer = state.rng.range(0.4, 0.8);
+        enemy.ai.jitterVec = rotateVec(enemy.ai.driftDir, Math.PI / 2);
         break;
     }
     return enemy;
@@ -309,6 +420,7 @@
       addToast(`レベルアップ！ Lv${player.level}`);
       state.pendingPerkChoices += 1;
       leveled = true;
+      state.multiplierUiDirty = true;
     }
     if (leveled) {
       maybeStartPerkDraft();
@@ -354,6 +466,7 @@
         grantXpSweepCharge(state, 1);
       },
     },
+    ...MULTIPLIER_PERKS,
     {
       id: 'prototype_boost',
       name: 'プロトタイプ: 共鳴コア',
@@ -535,13 +648,26 @@
         break;
       }
       case 'Swift': {
-        const desired = mulScalar(normalize(sub(player.pos, enemy.pos)), enemy.speed);
-        enemy.vel = lerpVec(enemy.vel, desired, 0.3);
+        enemy.ai.timer = (enemy.ai.timer || 0) - dt;
+        if (enemy.ai.timer <= 0) {
+          enemy.ai.timer = state.rng.range(1.2, 2.2);
+          const jitter = state.rng.range(-Math.PI / 8, Math.PI / 8);
+          enemy.ai.dir = normalize(rotateVec(enemy.ai.dir || vec2(1, 0), jitter));
+        }
+        const desiredDir = enemy.ai.dir || vec2(1, 0);
+        const desired = mulScalar(desiredDir, enemy.speed);
+        enemy.vel = lerpVec(enemy.vel, desired, 0.16);
         break;
       }
       case 'Zigzag': {
         enemy.ai.phase = (enemy.ai.phase || 0) + dt;
-        const baseDir = normalize(sub(player.pos, enemy.pos));
+        enemy.ai.retarget = (enemy.ai.retarget || 0) - dt;
+        if (enemy.ai.retarget <= 0) {
+          enemy.ai.retarget = state.rng.range(2.2, 3.6);
+          const angleShift = state.rng.range(-Math.PI / 6, Math.PI / 6);
+          enemy.ai.baseDir = normalize(rotateVec(enemy.ai.baseDir || vec2(1, 0), angleShift));
+        }
+        const baseDir = enemy.ai.baseDir || vec2(1, 0);
         const baseAngle = Math.atan2(baseDir.y, baseDir.x);
         const angle = baseAngle + (Math.PI / 6) * Math.sin(enemy.ai.phase * Math.PI * 2);
         const desired = { x: Math.cos(angle) * enemy.speed, y: Math.sin(angle) * enemy.speed };
@@ -560,21 +686,43 @@
         break;
       }
       case 'Blitz': {
-        enemy.ai.timer -= dt;
+        enemy.ai.timer = (enemy.ai.timer || 0) - dt;
         if (enemy.ai.timer <= 0) {
-          enemy.ai.timer = 0.8;
-          const dir = normalize(sub(player.pos, enemy.pos));
-          const jitter = state.rng.range(-0.2, 0.2);
-          const angle = Math.atan2(dir.y, dir.x) + jitter;
-          enemy.ai.dir = { x: Math.cos(angle), y: Math.sin(angle) };
+          enemy.ai.timer = 1.1;
+          const jitter = state.rng.range(-Math.PI / 6, Math.PI / 6);
+          enemy.ai.dir = normalize(rotateVec(enemy.ai.dir || vec2(1, 0), jitter));
+          enemy.ai.burst = 0.6;
         }
-        enemy.vel = mulScalar(enemy.ai.dir, enemy.speed);
+        enemy.ai.burst = Math.max(0, (enemy.ai.burst || 0) - dt);
+        const speedScale = enemy.ai.burst > 0 ? 1.2 : 0.7;
+        const desired = mulScalar(enemy.ai.dir || vec2(1, 0), enemy.speed * speedScale);
+        enemy.vel = lerpVec(enemy.vel, desired, 0.18);
         break;
       }
       case 'Heavy': {
-        const desiredDir = normalize(sub(player.pos, enemy.pos));
-        const desired = mulScalar(desiredDir, enemy.speed);
-        enemy.vel = lerpVec(enemy.vel, desired, 0.12);
+        enemy.ai.driftTimer = (enemy.ai.driftTimer || 0) - dt;
+        if (enemy.ai.driftTimer <= 0) {
+          enemy.ai.driftTimer = state.rng.range(1.4, 2.4);
+          const shift = state.rng.range(-Math.PI / 5, Math.PI / 5);
+          enemy.ai.driftDir = normalize(rotateVec(enemy.ai.driftDir || vec2(1, 0), shift));
+        }
+        enemy.ai.jitterTimer = (enemy.ai.jitterTimer || 0) - dt;
+        if (enemy.ai.jitterTimer <= 0) {
+          enemy.ai.jitterTimer = state.rng.range(0.5, 0.9);
+          const jitterAngle = state.rng.range(-Math.PI / 3, Math.PI / 3);
+          enemy.ai.jitterVec = normalize(rotateVec(enemy.ai.driftDir || vec2(1, 0), jitterAngle));
+        }
+        const toPlayer = normalize(sub(player.pos, enemy.pos));
+        const drift = enemy.ai.driftDir || vec2();
+        const desired = add(
+          mulScalar(toPlayer, enemy.speed * 0.6),
+          mulScalar(drift, enemy.speed * 0.4)
+        );
+        enemy.vel = lerpVec(enemy.vel, desired, 0.05);
+        enemy.vel = mulScalar(enemy.vel, 0.985);
+        if (enemy.ai.jitterVec) {
+          enemy.vel = add(enemy.vel, mulScalar(enemy.ai.jitterVec, 10 * dt));
+        }
         break;
       }
     }
@@ -689,8 +837,10 @@
     const player = state.player;
     while (state.multiplierTimer >= 1) {
       state.multiplierTimer -= 1;
-      for (const m of player.multipliers) {
-        tickSurvivalMultiplier(m);
+      const survival = player.multipliers.find(m => m.id === 'survival');
+      if (survival) {
+        tickSurvivalMultiplier(survival);
+        state.multiplierUiDirty = true;
       }
     }
     while (state.scoreTimer >= 1) {
@@ -739,33 +889,55 @@
     state.toasts = keep;
   }
 
-  function updateMultiplierBreakdownUI(state) {
+  function updateMultiplierBreakdownUI(state, force = false) {
     if (!multiplierBreakdown) return;
+    if (!force && !state.multiplierUiDirty && state.time - state.lastMultiplierUiUpdate < 1) {
+      return;
+    }
+    state.lastMultiplierUiUpdate = state.time;
+    state.multiplierUiDirty = false;
+
     const player = state.player;
     const survival = player.multipliers.find(m => m.id === 'survival');
-    const extras = player.multipliers.filter(m => m.id !== 'survival');
-    const parts = [];
-    MULTIPLIER_SLOTS.forEach((slot, idx) => {
-      let value = null;
-      if (slot.id === 'base') {
-        value = player.level.toFixed(0);
-      } else if (slot.id === 'survival') {
-        value = survival ? survival.M.toFixed(3) : null;
-      } else {
-        if (extras.length > 0) {
-          const extra = extras.shift();
-          value = extra.M.toFixed(3);
-        }
-      }
-      const labelSpan = `<span class="mul-label">${slot.label}</span>`;
-      const valueSpan =
-        value === null
-          ? `<span class="mul-dash">—</span>`
-          : `<span class="mul-value">${value}</span>`;
-      parts.push(`<span class="mul-part ${slot.colorClass}">${labelSpan} ${valueSpan}</span>`);
+    const extras = player.multipliers
+      .filter(m => m.id !== 'survival')
+      .slice()
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+    const segments = [
+      {
+        label: 'ベース',
+        value: player.level.toFixed(0),
+        className: 'mul-base',
+      },
+      {
+        label: '生存時間',
+        value: survival
+          ? survival.M.toFixed(MULTIPLIER_DECIMALS)
+          : (1).toFixed(MULTIPLIER_DECIMALS),
+        className: 'mul-survival',
+      },
+    ];
+
+    extras.forEach(extra => {
+      const def = getStackingMultiplierDef(extra.id);
+      const slotClass = MULTIPLIER_COLOR_CLASSES[extra.colorSlot ?? 0] ?? MULTIPLIER_COLOR_CLASSES[0];
+      segments.push({
+        label: def ? def.name : extra.name ?? extra.id,
+        value: extra.M.toFixed(MULTIPLIER_DECIMALS),
+        className: slotClass,
+      });
     });
+
     const operator = '<span class="mul-operator">×</span>';
-    multiplierBreakdown.innerHTML = parts.join(operator);
+    const nameRow = segments
+      .map(seg => `<span class="mul-segment ${seg.className}"><span class="mul-label">${seg.label}</span></span>`)
+      .join(operator);
+    const valueRow = segments
+      .map(seg => `<span class="mul-segment ${seg.className}"><span class="mul-value">${seg.value}</span></span>`)
+      .join(operator);
+
+    multiplierBreakdown.innerHTML = `<div class="mul-row mul-names">${nameRow}</div><div class="mul-row mul-values">${valueRow}</div>`;
   }
 
   function updateUI(state) {
@@ -936,6 +1108,9 @@
     pendingPerkChoices: 0,
     perkModalActive: false,
     currentPerkOptions: [],
+    nextMultiplierOrder: 0,
+    multiplierUiDirty: true,
+    lastMultiplierUiUpdate: -Infinity,
   };
 
   function resetState() {
@@ -958,6 +1133,9 @@
     state.pendingPerkChoices = 0;
     state.perkModalActive = false;
     state.currentPerkOptions = [];
+    state.nextMultiplierOrder = 0;
+    state.multiplierUiDirty = true;
+    state.lastMultiplierUiUpdate = -Infinity;
     for (const toast of state.toasts) {
       if (toast.element && toast.element.parentElement) {
         toast.element.parentElement.removeChild(toast.element);
