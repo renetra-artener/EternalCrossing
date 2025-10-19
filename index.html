@@ -15,14 +15,6 @@
         <div id="ps-display" class="hud-block"></div>
       </div>
       <div class="hud hud-right">
-        <div id="score-display" class="hud-block"></div>
-        <div id="next-break-display" class="hud-block">
-          <div class="label">Next Break</div>
-          <div class="next-break-text" id="next-break-text">--</div>
-          <div class="next-break-bar">
-            <div class="next-break-bar-fill" id="next-break-bar-fill"></div>
-          </div>
-        </div>
         <div id="level-display" class="hud-block">
           <div class="label">Lv <span id="level-text">1</span></div>
           <div class="xp-bar">
@@ -30,6 +22,10 @@
           </div>
           <div class="xp-text" id="xp-text"></div>
         </div>
+      </div>
+      <div id="escape-panel">
+        <div id="escape-distance" class="escape-distance-value">0</div>
+        <div id="multiplier-breakdown" class="escape-multiplier-breakdown"></div>
       </div>
       <div id="ability-panel">
         <div class="ability" id="ability-xp-range">
@@ -43,7 +39,16 @@
           <button id="xp-sweep-button">使用 (残り: <span id="xp-sweep-count">0</span>)</button>
         </div>
       </div>
-      <div id="multiplier-breakdown" class="hud-block"></div>
+      <div id="time-display" class="time-display">00:00</div>
+      <div id="relative-panel">
+        <div class="relative-labels">
+          <span class="player-label">PLAYER</span>
+          <span class="shuen-label">終焉</span>
+        </div>
+        <div class="relative-bar">
+          <div class="relative-shuen" id="relative-bar-shuen"></div>
+        </div>
+      </div>
       <div id="toast-container"></div>
       <div id="game-over" class="hidden">
         <h1>GAME OVER</h1>
