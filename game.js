@@ -8,16 +8,13 @@
   const PS_BASE = 50;
   const XP_ATTRACT_BASE = 100;
   const XP_ORB_LIFE = 15;
-  const WALL_FIRST_TIME = 10;
-  const WALL_INTERVAL = 20;
-  const WALL_SHRINK_T = 10;
-  const WALL_OUTER_R = Math.hypot(CANVAS_W, CANVAS_H);
-  const WALL_BAND_START = 220;
-  const WALL_BAND_END = 20;
-  const WALL_EXPLOSION_T = 0.6;
-  const WALL_THRESHOLD_TABLE = [12, 20, 35, 60, 100, 180, 300, 500, 850, 1300, 2000];
-  const WALL_DPS0 = 5;
-  const WALL_DPS_RATE = 1.2;
+  const SHUEN_INITIAL_SPEED = 120;
+  const SHUEN_GROWTH_INTERVAL = 20;
+  const SHUEN_GROWTH_RATE = 1.35;
+  const SHUEN_BAND_WIDTH = 12;
+  const SHUEN_RELATIVE_RANGE = 10000;
+  const SHUEN_DPS0 = 5;
+  const SHUEN_DPS_RATE = 1.2;
   const ENEMY_SPAWN_COOLDOWN_MIN = 0.8;
   const ENEMY_SPAWN_COOLDOWN_MAX = 1.6;
   const TARGET_ENEMIES_MAX_TIME = 10;
@@ -26,15 +23,6 @@
   const ENEMY_BASE_SPEED = 100;
   const ENEMY_OUT_MARGIN = 32;
   const XP_ORB_RADIUS = 6;
-
-  const SurvivalMultiplierDefaults = {
-    id: 'survival',
-    M: 1.1,
-    n: 1,
-    delta0: 0.005,
-    a: 0.0015,
-    S: 40,
-  };
 
   const STACKING_MULTIPLIERS = {
     nice: {
@@ -67,14 +55,15 @@
   };
 
   const STACKING_MULTIPLIER_ORDER = ['nice', 'predation', 'reflection'];
-  const MULTIPLIER_COLOR_CLASSES = ['mul-slot-1', 'mul-slot-2', 'mul-slot-3'];
+  const MULTIPLIER_COLOR_CLASSES = ['mul-slot-a', 'mul-slot-b', 'mul-slot-c', 'mul-slot-d'];
+  const MULTIPLIER_SLOT_LABELS = ['乗算A', '乗算B', '乗算C', '乗算D'];
   const MULTIPLIER_DECIMALS = 2;
 
   const canvas = document.getElementById('game-canvas');
   const ctx = canvas.getContext('2d');
   const hpDisplay = document.getElementById('hp-display');
   const psDisplay = document.getElementById('ps-display');
-  const scoreDisplay = document.getElementById('score-display');
+  const escapeDistanceText = document.getElementById('escape-distance');
   const levelText = document.getElementById('level-text');
   const xpText = document.getElementById('xp-text');
   const xpBarFill = document.getElementById('xp-bar-fill');
@@ -83,11 +72,11 @@
   const xpSweepButton = document.getElementById('xp-sweep-button');
   const toastContainer = document.getElementById('toast-container');
   const gameOverPanel = document.getElementById('game-over');
-  const nextBreakText = document.getElementById('next-break-text');
-  const nextBreakBarFill = document.getElementById('next-break-bar-fill');
   const multiplierBreakdown = document.getElementById('multiplier-breakdown');
   const perkModal = document.getElementById('perk-modal');
   const perkOptions = document.getElementById('perk-options');
+  const timeDisplay = document.getElementById('time-display');
+  const relativeBarShuen = document.getElementById('relative-bar-shuen');
 
   class Random {
     constructor(seed) {
@@ -145,6 +134,31 @@
     return a + (b - a) * t;
   }
 
+  function formatLargeNumber(value, fractionDigits = 2) {
+    if (!Number.isFinite(value)) return '∞';
+    if (value === 0) return '0';
+    const abs = Math.abs(value);
+    if (abs >= 1e6 || abs < 1e-2) {
+      return value.toExponential(fractionDigits).replace('+', '');
+    }
+    return value.toLocaleString('en-US', {
+      maximumFractionDigits: fractionDigits,
+      minimumFractionDigits: Math.min(fractionDigits, 2),
+    });
+  }
+
+  function shuenRatio(state) {
+    if (!state) return 0;
+    return Math.min(state.relativeDistance / SHUEN_RELATIVE_RANGE, 1);
+  }
+
+  function getShuenX(state) {
+    const ratio = shuenRatio(state);
+    const usableWidth = CANVAS_W - SHUEN_BAND_WIDTH;
+    const x = CANVAS_W - SHUEN_BAND_WIDTH - (1 - ratio) * usableWidth;
+    return clamp(x, 0, CANVAS_W - SHUEN_BAND_WIDTH);
+  }
+
   function lerpVec(a, b, t) {
     return { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t) };
   }
@@ -192,14 +206,6 @@
     return Math.ceil(base * Math.pow(1.3, extraLevel));
   }
 
-  function tickSurvivalMultiplier(m) {
-    const n = m.n;
-    const aEff = m.a * (m.S / (m.S + n));
-    const delta = m.delta0 + aEff * Math.max(0, n - 1);
-    m.M += delta;
-    m.n += 1;
-  }
-
   function getStackingMultiplierDef(id) {
     return STACKING_MULTIPLIERS[id] ?? null;
   }
@@ -219,12 +225,15 @@
 
     let multiplier = player.multipliers.find(m => m.id === id);
     if (!multiplier) {
-      const extras = player.multipliers.filter(m => m.id !== 'survival');
-      if (extras.length >= MULTIPLIER_COLOR_CLASSES.length) {
+      const takenSlots = player.multipliers.map(m => m.slotIndex ?? m.colorSlot ?? -1);
+      let slotIndex = 0;
+      while (takenSlots.includes(slotIndex) && slotIndex < MULTIPLIER_COLOR_CLASSES.length) {
+        slotIndex += 1;
+      }
+      if (slotIndex >= MULTIPLIER_COLOR_CLASSES.length) {
         addToast('倍率枠はこれ以上追加できません');
         return;
       }
-      const slotIndex = extras.length;
       multiplier = {
         id: def.id,
         name: def.name,
@@ -235,6 +244,7 @@
         S: def.S,
         order: state.nextMultiplierOrder++,
         colorSlot: slotIndex,
+        slotIndex,
       };
       applyStackingMultiplierGain(multiplier);
       player.multipliers.push(multiplier);
@@ -252,11 +262,14 @@
     const player = state.player;
     let multiplier = player.multipliers.find(m => m.id === 'nice');
     if (!multiplier) {
-      const extras = player.multipliers.filter(m => m.id !== 'survival');
-      if (extras.length >= MULTIPLIER_COLOR_CLASSES.length) {
+      const takenSlots = player.multipliers.map(m => m.slotIndex ?? m.colorSlot ?? -1);
+      let slotIndex = 0;
+      while (takenSlots.includes(slotIndex) && slotIndex < MULTIPLIER_COLOR_CLASSES.length) {
+        slotIndex += 1;
+      }
+      if (slotIndex >= MULTIPLIER_COLOR_CLASSES.length) {
         return;
       }
-      const slotIndex = extras.length;
       multiplier = {
         id: def.id,
         name: def.name,
@@ -267,6 +280,7 @@
         S: def.S,
         order: state.nextMultiplierOrder++,
         colorSlot: slotIndex,
+        slotIndex,
       };
       player.multipliers.push(multiplier);
     }
@@ -287,45 +301,6 @@
     };
   });
 
-  function wallThresholdAt(index) {
-    if (index < 0) index = 0;
-    if (index < WALL_THRESHOLD_TABLE.length) {
-      return WALL_THRESHOLD_TABLE[index];
-    }
-    let threshold = WALL_THRESHOLD_TABLE[WALL_THRESHOLD_TABLE.length - 1];
-    for (let i = WALL_THRESHOLD_TABLE.length; i <= index; i++) {
-      threshold = Math.ceil(threshold * 1.5);
-    }
-    return threshold;
-  }
-
-  function spawnWall(index, state) {
-    const center = { x: CANVAS_W / 2, y: CANVAS_H / 2 };
-    const wall = {
-      active: true,
-      t: 0,
-      T: WALL_SHRINK_T,
-      outerRadius: WALL_OUTER_R,
-      bandStart: WALL_BAND_START,
-      bandEnd: WALL_BAND_END,
-      currentBand: WALL_BAND_START,
-      innerRadius: Math.max(WALL_OUTER_R - WALL_BAND_START, 0),
-      threshold: wallThresholdAt(index),
-      center,
-      entered: false,
-      success: false,
-      damageElapsed: 0,
-      currentDps: WALL_DPS0,
-      index,
-      exploding: false,
-      explosionElapsed: 0,
-      explosionDuration: WALL_EXPLOSION_T,
-      explosionAlpha: 1,
-    };
-    addToast(`デッドライン出現！ スコア${wall.threshold}以上で突破`);
-    return wall;
-  }
-
   function createPlayer() {
     return {
       pos: { x: CANVAS_W / 2, y: CANVAS_H / 2 },
@@ -341,15 +316,8 @@
       xpAttractRadius: XP_ATTRACT_BASE,
       psMultiplier: 1,
       xpRangeStacks: 0,
-      score: 0,
-    multipliers: [{
-      id: SurvivalMultiplierDefaults.id,
-      M: SurvivalMultiplierDefaults.M,
-      n: SurvivalMultiplierDefaults.n,
-      delta0: SurvivalMultiplierDefaults.delta0,
-      a: SurvivalMultiplierDefaults.a,
-      S: SurvivalMultiplierDefaults.S,
-    }],
+      escapeDistance: 0,
+      multipliers: [],
     };
   }
 
@@ -486,16 +454,6 @@
     addToast(`XP全回収チャージ +${amount}`);
   }
 
-  function resolveWallSuccess(state, wall) {
-    if (wall.success) return;
-    wall.success = true;
-    wall.active = false;
-    state.breaks += 1;
-    state.nextWallIndex += 1;
-    addToast(`デッドライン突破！ (${state.breaks})`);
-    grantXpSweepCharge(state, 1);
-  }
-
   const PERK_LIBRARY = [
     {
       id: 'xp_attract',
@@ -617,49 +575,6 @@
       addToast('XP全回収：回収対象なし');
     }
     state.xpOrbs = [];
-  }
-
-  function handleWallCollision(state, dt) {
-    const wall = state.wall;
-    if (!wall || !wall.active) return;
-    const player = state.player;
-    const dist = Math.hypot(player.pos.x - wall.center.x, player.pos.y - wall.center.y);
-    const outerRadius = wall.outerRadius ?? WALL_OUTER_R;
-    const innerRadius = clamp(wall.innerRadius ?? 0, 0, outerRadius);
-    const inside = dist >= innerRadius && dist <= outerRadius;
-
-    if (inside && !wall.exploding) {
-      if (!wall.entered) {
-        wall.entered = true;
-        if (player.score >= wall.threshold) {
-          resolveWallSuccess(state, wall);
-        } else {
-          addToast('スコア不足！デッドラインに耐えろ');
-        }
-      }
-      if (!wall.success && player.score >= wall.threshold) {
-        resolveWallSuccess(state, wall);
-      }
-      if (!wall.success) {
-        wall.damageElapsed += dt;
-        if (wall.damageElapsed >= 1) {
-          wall.damageElapsed -= 1;
-          const damage = wall.currentDps;
-          player.hp -= damage;
-          wall.currentDps *= WALL_DPS_RATE;
-          addToast(`デッドラインダメージ -${damage.toFixed(1)}`);
-          if (player.hp <= 0) {
-            player.hp = 0;
-            triggerGameOver(state);
-          }
-        }
-      }
-    } else {
-      if (!wall.success) {
-        wall.damageElapsed = 0;
-        wall.currentDps = WALL_DPS0;
-      }
-    }
   }
 
   function triggerGameOver(state) {
@@ -814,20 +729,6 @@
   }
 
   function randomPointAvoidingWall(state) {
-    const wall = state.wall;
-    for (let attempts = 0; attempts < 10; attempts++) {
-      const p = {
-        x: state.rng.range(40, CANVAS_W - 40),
-        y: state.rng.range(40, CANVAS_H - 40),
-      };
-      if (wall && wall.active) {
-        const dist = Math.hypot(p.x - wall.center.x, p.y - wall.center.y);
-        const outer = wall.outerRadius ?? WALL_OUTER_R;
-        const inner = clamp(wall.innerRadius ?? 0, 0, outer);
-        if (dist >= inner && dist <= outer) continue;
-      }
-      return p;
-    }
     return {
       x: state.rng.range(40, CANVAS_W - 40),
       y: state.rng.range(40, CANVAS_H - 40),
@@ -860,8 +761,8 @@
   function refillEnemies(state, dt) {
     if (state.spawnPaused) return;
     state.spawnCooldown -= dt;
-    const target = targetEnemies(Math.floor(state.time), state.breaks);
-    const weights = spawnWeights(state.breaks);
+    const target = targetEnemies(Math.floor(state.time), 0);
+    const weights = spawnWeights(0);
     while (state.enemies.length < target && state.spawnCooldown <= 0) {
       const type = weightedPick(state.rng, weights);
       state.enemies.push(spawnEnemy(state, type));
@@ -883,56 +784,60 @@
     player.pos.y = clamp(player.pos.y, player.r, CANVAS_H - player.r);
   }
 
-  function updateWall(state, dt) {
-    const wall = state.wall;
-    if (!wall || !wall.active) return;
-    if (wall.success) return;
+  function escapeMultiplierProduct(player) {
+    return player.multipliers.reduce((acc, m) => acc * m.M, 1);
+  }
 
-    if (wall.exploding) {
-      wall.explosionElapsed += dt;
-      const explodeProgress = clamp(wall.explosionElapsed / wall.explosionDuration, 0, 1);
-      const targetBand = Math.min(wall.outerRadius, lerp(wall.bandEnd, wall.outerRadius, explodeProgress));
-      wall.currentBand = targetBand;
-      wall.innerRadius = Math.max(wall.outerRadius - wall.currentBand, 0);
-      wall.explosionAlpha = 1 - explodeProgress;
-      if (wall.explosionElapsed >= wall.explosionDuration) {
-        wall.active = false;
-      }
-      return;
-    }
-
-    wall.t += dt;
-    const progress = clamp(wall.t / wall.T, 0, 1);
-    wall.currentBand = lerp(wall.bandStart, wall.bandEnd, progress);
-    wall.innerRadius = Math.max(wall.outerRadius - wall.currentBand, 0);
-
-    if (wall.t >= wall.T) {
-      wall.t = wall.T;
-      if (!wall.entered) {
-        addToast('デッドラインが中心に収束');
-      }
-      wall.exploding = true;
-      wall.explosionElapsed = 0;
-      wall.explosionAlpha = 1;
+  function updateEscapeProgress(state, dt) {
+    state.escapeAccumulator += dt;
+    const player = state.player;
+    const timeFactor = Math.floor(state.time / 10) + 1;
+    const multiplierProduct = escapeMultiplierProduct(player);
+    const deltaPerSecond = player.level * timeFactor * multiplierProduct;
+    while (state.escapeAccumulator >= 1) {
+      player.escapeDistance += deltaPerSecond;
+      state.relativeDistance += deltaPerSecond - state.shuenSpeed;
+      const maxBuffer = SHUEN_RELATIVE_RANGE * 2;
+      state.relativeDistance = clamp(state.relativeDistance, -SHUEN_RELATIVE_RANGE, maxBuffer);
+      state.escapeAccumulator -= 1;
     }
   }
 
-  function updateScore(state, dt) {
-    state.scoreTimer += dt;
-    state.multiplierTimer += dt;
+  function isShuenOverlapping(state) {
+    if (state.relativeDistance > 0) return false;
     const player = state.player;
-    while (state.multiplierTimer >= 1) {
-      state.multiplierTimer -= 1;
-      const survival = player.multipliers.find(m => m.id === 'survival');
-      if (survival) {
-        tickSurvivalMultiplier(survival);
-        state.multiplierUiDirty = true;
+    const shuenFront = getShuenX(state) + SHUEN_BAND_WIDTH;
+    return player.pos.x <= shuenFront;
+  }
+
+  function updateShuenDamage(state, dt) {
+    const player = state.player;
+    if (isShuenOverlapping(state)) {
+      state.shuenDamageTimer += dt;
+      while (state.shuenDamageTimer >= 1) {
+        state.shuenDamageTimer -= 1;
+        const damage = state.shuenCurrentDps;
+        player.hp -= damage;
+        state.shuenCurrentDps *= SHUEN_DPS_RATE;
+        addToast(`終焉ダメージ -${damage.toFixed(1)}`);
+        if (player.hp <= 0) {
+          player.hp = 0;
+          triggerGameOver(state);
+          break;
+        }
       }
+    } else {
+      state.shuenDamageTimer = 0;
+      state.shuenCurrentDps = SHUEN_DPS0;
     }
-    while (state.scoreTimer >= 1) {
-      const perSecond = player.level * player.multipliers.reduce((acc, m) => acc * m.M, 1);
-      player.score += perSecond;
-      state.scoreTimer -= 1;
+  }
+
+  function updateShuenSpeed(state, dt) {
+    state.shuenGrowthTimer += dt;
+    while (state.shuenGrowthTimer >= SHUEN_GROWTH_INTERVAL) {
+      state.shuenGrowthTimer -= SHUEN_GROWTH_INTERVAL;
+      state.shuenSpeed *= SHUEN_GROWTH_RATE;
+      addToast(`終焉の追尾速度が上昇 (${state.shuenSpeed.toFixed(1)})`);
     }
   }
 
@@ -984,36 +889,27 @@
     state.multiplierUiDirty = false;
 
     const player = state.player;
-    const survival = player.multipliers.find(m => m.id === 'survival');
-    const extras = player.multipliers
-      .filter(m => m.id !== 'survival')
-      .slice()
-      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-
     const segments = [
       {
-        label: 'ベース',
-        value: player.level.toFixed(0),
-        className: 'mul-base',
-      },
-      {
-        label: '生存時間',
-        value: survival
-          ? survival.M.toFixed(MULTIPLIER_DECIMALS)
-          : (1).toFixed(MULTIPLIER_DECIMALS),
-        className: 'mul-survival',
+        label: '加速',
+        value: formatLargeNumber(player.level, MULTIPLIER_DECIMALS),
+        className: 'mul-accel',
       },
     ];
 
-    extras.forEach(extra => {
-      const def = getStackingMultiplierDef(extra.id);
-      const slotClass = MULTIPLIER_COLOR_CLASSES[extra.colorSlot ?? 0] ?? MULTIPLIER_COLOR_CLASSES[0];
+    for (let i = 0; i < MULTIPLIER_COLOR_CLASSES.length; i += 1) {
+      const slotClass = MULTIPLIER_COLOR_CLASSES[i];
+      const slotLabel = MULTIPLIER_SLOT_LABELS[i] ?? `乗算${String.fromCharCode(65 + i)}`;
+      const slotMultiplier = player.multipliers.find(
+        m => (m.slotIndex ?? m.colorSlot ?? -1) === i
+      );
+      const value = slotMultiplier ? slotMultiplier.M : 1;
       segments.push({
-        label: def ? def.name : extra.name ?? extra.id,
-        value: extra.M.toFixed(MULTIPLIER_DECIMALS),
+        label: slotLabel,
+        value: formatLargeNumber(value, MULTIPLIER_DECIMALS),
         className: slotClass,
       });
-    });
+    }
 
     const operator = '<span class="mul-operator">×</span>';
     const nameRow = segments
@@ -1030,7 +926,9 @@
     const player = state.player;
     hpDisplay.textContent = `HP: ${Math.ceil(player.hp)}/${player.maxHp}`;
     psDisplay.textContent = `PS: ${Math.round(player.psRadius)}px`;
-    scoreDisplay.innerHTML = `<div class="score-label">SCORE</div><div class="score-value">${player.score.toFixed(1)}</div>`;
+    if (escapeDistanceText) {
+      escapeDistanceText.textContent = `${formatLargeNumber(player.escapeDistance, 2)} 光年`;
+    }
     levelText.textContent = player.level;
     xpText.textContent = `${Math.floor(player.xp)}/${player.xpNeeded}`;
     const ratio = clamp(player.xp / player.xpNeeded, 0, 1);
@@ -1039,11 +937,19 @@
     xpSweepCount.textContent = state.xpSweepCharges;
     xpSweepButton.disabled = state.xpSweepCharges <= 0 || state.paused;
 
-    const nextThreshold = state.wall && state.wall.active ? state.wall.threshold : wallThresholdAt(state.nextWallIndex);
-    const scoreText = player.score.toFixed(1);
-    nextBreakText.textContent = `${nextThreshold} (Score ${scoreText} / ${nextThreshold})`;
-    const progress = nextThreshold > 0 ? clamp(player.score / nextThreshold, 0, 1) : 0;
-    nextBreakBarFill.style.width = `${progress * 100}%`;
+    if (timeDisplay) {
+      const elapsed = Math.floor(state.time);
+      const minutes = String(Math.floor(elapsed / 60)).padStart(2, '0');
+      const seconds = String(elapsed % 60).padStart(2, '0');
+      timeDisplay.textContent = `${minutes}:${seconds}`;
+    }
+
+    if (relativeBarShuen) {
+      const ratioRelative = clamp(state.relativeDistance / SHUEN_RELATIVE_RANGE, 0, 1);
+      const widthPercent = clamp(1 - ratioRelative, 0, 1);
+      const adjusted = Math.max(widthPercent * 100, widthPercent > 0 ? 1 : 0);
+      relativeBarShuen.style.width = `${adjusted}%`;
+    }
 
     updateMultiplierBreakdownUI(state);
   }
@@ -1057,39 +963,12 @@
 
     const player = state.player;
 
-    // Draw deadline wall
-    if (state.wall && state.wall.active) {
-      const wall = state.wall;
-      const outerRadius = wall.outerRadius ?? WALL_OUTER_R;
-      const innerRadius = clamp(wall.innerRadius ?? 0, 0, outerRadius);
-      const fillAlpha = wall.exploding ? clamp(wall.explosionAlpha ?? 1, 0, 1) : 1;
-
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(wall.center.x, wall.center.y, outerRadius, 0, Math.PI * 2);
-      if (innerRadius > 0) {
-        ctx.arc(wall.center.x, wall.center.y, innerRadius, 0, Math.PI * 2, true);
-      }
-      ctx.clip('evenodd');
-      ctx.globalAlpha = fillAlpha;
-      ctx.fillStyle = 'rgba(255, 60, 80, 0.28)';
-      ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-      ctx.restore();
-
-      ctx.save();
-      ctx.lineWidth = 2;
-      const strokeAlpha = wall.exploding ? clamp((wall.explosionAlpha ?? 1) * 0.9, 0, 0.9) : 0.9;
-      ctx.strokeStyle = `rgba(255,255,255,${strokeAlpha})`;
-      ctx.beginPath();
-      ctx.arc(wall.center.x, wall.center.y, outerRadius, 0, Math.PI * 2);
-      ctx.stroke();
-      if (innerRadius > 0 && innerRadius < outerRadius) {
-        ctx.beginPath();
-        ctx.arc(wall.center.x, wall.center.y, innerRadius, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
+    // Draw Shuen curtain
+    const shuenX = getShuenX(state);
+    ctx.save();
+    ctx.fillStyle = 'rgba(255, 64, 80, 0.45)';
+    ctx.fillRect(shuenX, 0, SHUEN_BAND_WIDTH, CANVAS_H);
+    ctx.restore();
 
     // Personal space circle
     ctx.save();
@@ -1184,14 +1063,8 @@
     enemies: [],
     xpOrbs: [],
     time: 0,
-    breaks: 0,
-    wall: null,
     spawnCooldown: 0,
     running: true,
-    nextWallTime: WALL_FIRST_TIME,
-    nextWallIndex: 0,
-    scoreTimer: 0,
-    multiplierTimer: 0,
     toasts: [],
     xpSweepCharges: 0,
     spawnPaused: false,
@@ -1202,6 +1075,12 @@
     nextMultiplierOrder: 0,
     multiplierUiDirty: true,
     lastMultiplierUiUpdate: -Infinity,
+    escapeAccumulator: 0,
+    relativeDistance: SHUEN_RELATIVE_RANGE,
+    shuenSpeed: SHUEN_INITIAL_SPEED,
+    shuenGrowthTimer: 0,
+    shuenDamageTimer: 0,
+    shuenCurrentDps: SHUEN_DPS0,
   };
 
   function resetState() {
@@ -1210,14 +1089,8 @@
     state.enemies = [];
     state.xpOrbs = [];
     state.time = 0;
-    state.breaks = 0;
-    state.wall = null;
     state.spawnCooldown = 0;
     state.running = true;
-    state.nextWallTime = WALL_FIRST_TIME;
-    state.nextWallIndex = 0;
-    state.scoreTimer = 0;
-    state.multiplierTimer = 0;
     state.xpSweepCharges = 0;
     state.spawnPaused = false;
     state.paused = false;
@@ -1227,6 +1100,12 @@
     state.nextMultiplierOrder = 0;
     state.multiplierUiDirty = true;
     state.lastMultiplierUiUpdate = -Infinity;
+    state.escapeAccumulator = 0;
+    state.relativeDistance = SHUEN_RELATIVE_RANGE;
+    state.shuenSpeed = SHUEN_INITIAL_SPEED;
+    state.shuenGrowthTimer = 0;
+    state.shuenDamageTimer = 0;
+    state.shuenCurrentDps = SHUEN_DPS0;
     for (const toast of state.toasts) {
       if (toast.element && toast.element.parentElement) {
         toast.element.parentElement.removeChild(toast.element);
@@ -1248,20 +1127,11 @@
     updateEnemies(state, dt);
     updateDamageFromEnemies(state);
     updateXpOrbs(state, dt);
-    updateWall(state, dt);
-    handleWallCollision(state, dt);
+    updateEscapeProgress(state, dt);
+    updateShuenDamage(state, dt);
     pickXpIfCollide(state);
     refillEnemies(state, dt);
-    updateScore(state, dt);
-
-    if (!state.wall && state.time >= state.nextWallTime) {
-      state.wall = spawnWall(state.nextWallIndex, state);
-      state.nextWallTime += WALL_INTERVAL;
-    }
-
-    if (state.wall && !state.wall.active) {
-      state.wall = null;
-    }
+    updateShuenSpeed(state, dt);
   }
 
   function renderLoop(timestamp) {
@@ -1325,13 +1195,9 @@
           resetState();
         }
         break;
-      case 'F1':
-        state.wall = spawnWall(state.nextWallIndex, state);
-        state.nextWallTime = state.time + WALL_INTERVAL;
-        break;
       case 'F2':
-        state.player.score += 10;
-        addToast('スコア +10 (F2)');
+        state.player.escapeDistance += 10;
+        addToast('逃避距離 +10 (F2)');
         break;
       case 'F3':
         applyXpToPlayer(state, 5);
@@ -1343,9 +1209,16 @@
         break;
       case 'F9':
         console.log('--- Acceptance check ---');
-        console.log('Score timer per second:', state.player.level, state.player.multipliers.map(m => m.M));
-        console.log('Enemies target:', targetEnemies(Math.floor(state.time), state.breaks));
-        console.log('Breaks:', state.breaks, 'Next wall threshold', wallThresholdAt(state.nextWallIndex));
+        console.log('Escape delta factors:', {
+          level: state.player.level,
+          timeFactor: Math.floor(state.time / 10) + 1,
+          multipliers: state.player.multipliers.map(m => ({ id: m.id, M: m.M })),
+        });
+        console.log('Shuen state:', {
+          speed: state.shuenSpeed,
+          relative: state.relativeDistance,
+        });
+        console.log('Enemies target:', targetEnemies(Math.floor(state.time), 0));
         console.log('XP orbs:', state.xpOrbs.length);
         console.log('XP attract radius:', state.player.xpAttractRadius);
         console.log('------------------------');
